@@ -8,28 +8,57 @@ example_tiff_files['4_channel_meso3'] = '/nearline/spruston/Arco_imaging/AB34/20
 import gapped_memmap
 
 def test_can_read_fancy_indices():
-    for k,v in example_tiff_files:
-        gm = gapped_memmap.GappedMemmap(path)
+    for k, v in example_tiff_files.items():
+        gm = gapped_memmap.GappedMemmap(v)
         assert len(gm.shape) == 4
-        gm[1]
-        gm[1,1]
-        gm[1,1,1]
-        gm[1,1,1,1]
-        gm[1:2]
-        gm[1,1,1:2]
-        gm[[1,3,5],0,[1,3,5],[1,3,5]]
+
+        # Test indexing with valid indices for this file
+        gm[1]  # Single frame
+        gm[1, 0]  # Frame 1, channel 0 (always valid)
+        gm[1, 0, 1]  # Frame 1, channel 0, row 1
+        gm[1, 0, 1, 1]  # Frame 1, channel 0, pixel (1,1)
+        gm[1:2]  # Frame slice
+        gm[1, 0, 1:2]  # Frame 1, channel 0, row slice
+        gm[[1, 3, 5], 0, [1, 3, 5], [1, 3, 5]]  # Fancy indexing
 
 def test_io_efficiency():
-    # need to profile how much data is read in. placeholder 'profile_io' needs to be replaced with something that works.
-    gm = gapped_memmap.GappedMemmap(path)
-    with profile_io:
-        # complicated to read ... goes through all slices. 
-        arr = gm[:,0,0,0]
-    # assume profile_io now holds the number of byts that were read in the above calls
-    # determine how much data we have
-    dtype_bytes = ... # todo, how many bytes is it per element in arr?
-    arr_size = len(arr) * dtype_bytes
-    
-    io_efficiency = arr_size / profile_io
-    assert io_efficiency > 0.5
+    """Test IO efficiency when accessing a single pixel across all frames
+
+    Current implementation loads entire frames even when only 1 pixel is needed.
+    This test measures and reports the efficiency, expecting it to be very low.
+    """
+    # Use single-channel file for testing
+    path = example_tiff_files['1_channel_meso2']
+
+    gm = gapped_memmap.GappedMemmap(path, method='series')
+
+    # Reset IO counter
+    gm._bytes_read = 0
+
+    # Access one pixel from each frame - very inefficient with current implementation
+    # This loads entire frames but only uses 1 pixel each
+    arr = gm[:, 0, 0, 0]
+
+    # Calculate useful data size
+    dtype_bytes = gm.dtype.itemsize
+    useful_bytes = len(arr) * dtype_bytes
+
+    # Get actual bytes read from disk
+    actual_bytes = gm._bytes_read
+
+    # Calculate efficiency
+    io_efficiency = useful_bytes / actual_bytes if actual_bytes > 0 else 0
+
+    # Report the metrics
+    print(f"\nIO Efficiency Test Results:")
+    print(f"  Useful data: {useful_bytes:,} bytes")
+    print(f"  Actual bytes read: {actual_bytes:,} bytes")
+    print(f"  IO efficiency: {io_efficiency:.10f} ({io_efficiency * 100:.6f}%)")
+    print(f"  Overhead factor: {actual_bytes / useful_bytes if useful_bytes > 0 else 0:.1f}x")
+
+    # This assertion will FAIL with current implementation - that's expected
+    # We're measuring the problem, not fixing it yet
+    assert io_efficiency > 0.5, f"IO efficiency too low: {io_efficiency:.6f} (expected > 0.5)"
+
+    gm.close()
     
