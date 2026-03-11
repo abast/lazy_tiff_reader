@@ -36,24 +36,33 @@ class MemmapTiffSI:
 
     Attributes
     ----------
+    metadata : dict or None
+        Full ScanImage metadata from the TIFF (tifffile scanimage_metadata). None if not SI.
+    n_volumes, n_zplanes, n_channels : int
+        Dimensions T, Z, C from metadata (Z=1 for 2D acquisitions).
+    resolution_xyz : tuple of float
+        (x, y, z) in µm per pixel from TIFF tags and SI.hStackManager.stackZStepSize.
+    acquisition_parameters : dict
+        Key FrameData values (e.g. frame_rate, volume_rate, z_step_size).
     shape : tuple
-        Shape of the data array (T, C, Y, X)
+        Shape of the data array (T, Z, C, Y, X)
     dtype : np.dtype
         Data type of the image data
     ndim : int
-        Number of dimensions (always 4)
+        Number of dimensions (always 5)
 
     Examples
     --------
-    >>> mm = MemmmapTiffSI('data.tif')
-    >>> frame = mm[0]              # Get first frame: (C, Y, X)
-    >>> frames = mm[0:10]          # Get frame range: (10, C, Y, X)
-    >>> channel = mm[:, 0, :, :]   # Get channel 0 all frames: (T, Y, X)
+    >>> mm = MemmapTiffSI('data.tif')
+    >>> mm.shape
+    (10, 1, 2, 512, 512)   # T, Z, C, Y, X
+    >>> frame = mm[0, 0]   # First volume, first Z: (C, Y, X)
+    >>> mm[0, 0, 0]        # t=0, z=0, c=0: (Y, X)
     """
 
     def __init__(self, tiff_path):
         """
-        Initialize MemmmapTiffSI instance.
+        Initialize MemmapTiffSI instance.
 
         Parameters
         ----------
@@ -63,36 +72,91 @@ class MemmapTiffSI:
         self._tiff_path = tiff_path
         self._mmap = None
         self._data = None
+        self._si_metadata = None
+        self._resolution_xyz = [0.0, 0.0, 0.0]
+        self._acquisition_parameters = {}
 
-        # Extract metadata from TIFF
         with tifffile.TiffFile(tiff_path) as tif:
-            # Get ScanImage metadata
             si_meta = tif.scanimage_metadata
-            frame_data = si_meta['FrameData']
-            channels_saved = frame_data['SI.hChannels.channelSave']
+            if si_meta is not None:
+                self._si_metadata = si_meta
+            frame_data = (si_meta or {}).get('FrameData') or {}
 
-            # Handle both single channel (int) and multi-channel (list)
+            # Channels
+            channels_saved = frame_data.get('SI.hChannels.channelSave', 1)
             if isinstance(channels_saved, (list, tuple)):
-                self.nchannels = len(channels_saved)
+                n_channels = len(channels_saved)
             else:
-                self.nchannels = 1  # Single channel stored as int
+                n_channels = 1
+            self.n_channels = n_channels
+            self.nchannels = n_channels  # alias
 
-            # Get page shape and dtype
+            # Page shape and dtype
             page = tif.pages[0]
             self.height, self.width = page.shape
             self.dtype = np.dtype(page.dtype)
-
-            # Calculate stride from first two pages
             self.data_offset_0 = page.dataoffsets[0]
             offset_1 = tif.pages[1].dataoffsets[0]
             self.stride = offset_1 - self.data_offset_0
 
-            # Calculate number of frames
             npages = get_si_tiff_n_pages(tiff_path)
-            self.nframes = npages // self.nchannels
 
-            # Store final shape
-            self._shape = (self.nframes, self.nchannels, self.height, self.width)
+            # T, Z dimensions from metadata
+            n_zplanes = frame_data.get('SI.hStackManager.actualNumSlices', 1)
+            n_volumes = frame_data.get('SI.hStackManager.actualNumVolumes', 0)
+            if n_volumes <= 0 or n_zplanes <= 0:
+                n_zplanes = 1
+                n_volumes = npages // n_channels
+            else:
+                if npages != n_volumes * n_zplanes * n_channels:
+                    n_zplanes = 1
+                    n_volumes = npages // n_channels
+            self.n_zplanes = n_zplanes
+            self.n_volumes = n_volumes
+
+            self._shape = (n_volumes, n_zplanes, n_channels, self.height, self.width)
+
+            # Resolution: x, y from TIFF tags; z from FrameData
+            self._extract_resolution(tif, frame_data)
+
+            # Acquisition parameters from FrameData
+            self._acquisition_parameters = self._extract_acquisition_parameters(frame_data)
+
+    def _extract_resolution(self, tif, frame_data):
+        """Extract resolution_xyz (x, y, z) in µm from TIFF tags and FrameData."""
+        try:
+            p0 = tif.pages[0]
+            if hasattr(p0, 'tags') and 'XResolution' in p0.tags:
+                x_res = p0.tags['XResolution'].value
+                y_res = p0.tags['YResolution'].value
+                unit = getattr(p0.tags.get('ResolutionUnit'), 'value', 1)
+                if unit == 2:  # inch
+                    self._resolution_xyz[0] = 25400.0 / (float(x_res[0]) / float(x_res[1]))
+                    self._resolution_xyz[1] = 25400.0 / (float(y_res[0]) / float(y_res[1]))
+                elif unit == 3:  # cm
+                    self._resolution_xyz[0] = 10000.0 / (float(x_res[0]) / float(x_res[1]))
+                    self._resolution_xyz[1] = 10000.0 / (float(y_res[0]) / float(y_res[1]))
+        except Exception:
+            pass
+        z_step = frame_data.get('SI.hStackManager.stackZStepSize')
+        if z_step is not None:
+            try:
+                self._resolution_xyz[2] = float(z_step)
+            except (TypeError, ValueError):
+                pass
+
+    def _extract_acquisition_parameters(self, frame_data):
+        """Extract key acquisition parameters from FrameData."""
+        out = {}
+        keys = {
+            'frame_rate': 'SI.hRoiManager.scanFrameRate',
+            'volume_rate': 'SI.hRoiManager.scanVolumeRate',
+            'z_step_size': 'SI.hStackManager.stackZStepSize',
+        }
+        for name, key in keys.items():
+            if key in frame_data:
+                out[name] = frame_data[key]
+        return out
 
     def _ensure_mmap(self):
         """Lazy load the memory map of the entire file"""
@@ -107,61 +171,43 @@ class MemmapTiffSI:
             )
 
     def _create_strided_view(self):
-        """Create strided numpy view over the memory-mapped file"""
+        """Create 5D strided view (T, Z, C, Y, X). Page order: t*Z*C + z*C + c."""
         self._ensure_mmap()
 
         if self._data is not None:
-            return  # Already created
+            return
 
-        # First, view the uint8 memmap as the correct dtype
-        # This converts byte-level memmap to pixel-level array
         mmap_as_dtype = self._mmap.view(self.dtype)
-
-        # Calculate the offset in dtype units (not bytes)
         dtype_offset = self.data_offset_0 // self.dtype.itemsize
+        itemsize = self.dtype.itemsize
+        T, Z, C, H, W = self._shape
+        stride_page = self.stride  # bytes per page
 
-        # Calculate strides in dtype units (not bytes)
-        # Strides describe how many dtype elements to skip, not bytes
-        stride_in_dtype = self.stride // self.dtype.itemsize
-        row_stride_in_dtype = self.width  # pixels per row
-
-        if self.nchannels > 1:
-            # Multi-channel: channels are interleaved pages
-            # Page order: [F0C0, F0C1, F0C2, F0C3, F1C0, F1C1, ...]
-            strides = (
-                self.stride * self.nchannels,  # Frame stride: skip all channel pages (in bytes)
-                self.stride,                    # Channel stride: next page (in bytes)
-                self.width * self.dtype.itemsize,  # Row stride (in bytes)
-                self.dtype.itemsize             # Pixel stride (in bytes)
-            )
-        else:
-            # Single channel
-            strides = (
-                self.stride,                    # Frame stride: next page (in bytes)
-                0,                               # Channel stride: N/A (only 1 channel)
-                self.width * self.dtype.itemsize,  # Row stride (in bytes)
-                self.dtype.itemsize             # Pixel stride (in bytes)
-            )
-
-        # Create strided view starting at first frame's data
-        # Use the dtype-viewed memmap starting at the data offset
+        # Strides in bytes: [t, z, c, y, x] -> page k = t*Z*C + z*C + c, then y, x within page
+        strides = (
+            Z * C * stride_page,
+            C * stride_page,
+            stride_page,
+            W * itemsize,
+            itemsize,
+        )
         self._data = as_strided(
             mmap_as_dtype[dtype_offset:],
             shape=self._shape,
             strides=strides,
-            writeable=False
+            writeable=False,
         )
 
     def __getitem__(self, key):
         """
-        Get data by indexing directly into strided view.
+        Get data by indexing directly into the 5D strided view.
 
-        No copying for full-frame access. Returns direct views into memmap.
+        No copying for contiguous access. Returns views into memmap.
 
         Parameters
         ----------
         key : int, slice, or tuple
-            Index/slice into (T, C, Y, X) dimensions
+            Index/slice into (T, Z, C, Y, X) dimensions
 
         Returns
         -------
@@ -170,26 +216,41 @@ class MemmapTiffSI:
 
         Examples
         --------
-        >>> mm[0]                    # Single frame: (C, Y, X)
-        >>> mm[0:10]                 # Frame range: (T, C, Y, X)
-        >>> mm[0, 0]                 # Frame 0, channel 0: (Y, X)
-        >>> mm[:, 0, :, :]           # All frames, channel 0: (T, Y, X)
+        >>> mm[0, 0]           # First volume, first Z: (C, Y, X)
+        >>> mm[0, 0, 0]        # t=0, z=0, c=0: (Y, X)
+        >>> mm[:, 0, :, :, :]  # All T, z=0: (T, C, Y, X)
         """
         if self._data is None:
             self._create_strided_view()
-
-        # Direct indexing into strided view - no copying for contiguous access!
         return self._data[key]
 
     @property
+    def metadata(self):
+        """
+        ScanImage metadata dict from the TIFF (parsed by tifffile from ImageDescription).
+        None if the file was not recognized as ScanImage.
+        """
+        return self._si_metadata
+
+    @property
+    def resolution_xyz(self):
+        """(x, y, z) resolution in µm per pixel from TIFF tags and stack Z step."""
+        return tuple(self._resolution_xyz)
+
+    @property
+    def acquisition_parameters(self):
+        """Key acquisition parameters from FrameData (e.g. frame_rate, volume_rate, z_step_size)."""
+        return dict(self._acquisition_parameters)
+
+    @property
     def shape(self):
-        """Shape of the data array (T, C, Y, X)"""
+        """Shape of the data array (T, Z, C, Y, X)."""
         return self._shape
 
     @property
     def ndim(self):
-        """Number of dimensions (always 4)"""
-        return 4
+        """Number of dimensions (always 5)."""
+        return 5
 
     def __repr__(self):
         return (f"MemmapTiffSI(shape={self.shape}, dtype={self.dtype}, "
