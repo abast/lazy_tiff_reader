@@ -1,7 +1,30 @@
 """Utility to calculate number of pages in ScanImage TIFF files."""
 
 import os
+import struct
 import tifffile
+
+# ScanImage BigTIFF custom header magic (bytes 16-19, little-endian)
+_SI_BIGTIFF_MAGIC = 117637889  # 0x07030301
+
+
+def _is_scanimage_bigtiff(tiff_path: str) -> bool:
+    """Return True if the file has a ScanImage BigTIFF header (fast, no IFD scan)."""
+    try:
+        with open(tiff_path, 'rb') as f:
+            hdr = f.read(4)
+            if len(hdr) < 4 or hdr[:2] != b'II':
+                return False
+            if struct.unpack_from('<H', hdr, 2)[0] != 43:
+                return False  # not BigTIFF
+            f.seek(16)
+            si_hdr = f.read(8)
+            if len(si_hdr) < 4:
+                return False
+            magic = struct.unpack_from('<I', si_hdr, 0)[0]
+            return magic == _SI_BIGTIFF_MAGIC
+    except OSError:
+        return False
 
 
 def get_si_tiff_n_pages(tiff_path: str) -> int:
@@ -51,10 +74,13 @@ def get_si_tiff_n_pages(tiff_path: str) -> int:
     # Get file size
     file_size = os.path.getsize(tiff_path)
 
+    # Check SI magic without using tif.scanimage_metadata (which hangs for
+    # ScanImage 2023.1+ files with large FrameData blobs).
+    if not _is_scanimage_bigtiff(tiff_path):
+        raise RuntimeError("Not a scanimage tiff file")
+
     # Open TIFF and get IFD offsets
     with tifffile.TiffFile(tiff_path) as tif:
-        if tif.scanimage_metadata is None:
-            raise RuntimeError("Not a scanimage tiff file")
         # Use IFD offsets (not image data offsets)
         offset_0 = tif.pages[0].offset  # First IFD position
         try:

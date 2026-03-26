@@ -10,6 +10,7 @@ import numpy as np
 import tifffile
 from numpy.lib.stride_tricks import as_strided
 from utils.get_si_tiff_n_pages import get_si_tiff_n_pages
+from utils.read_si_framedata_params import read_si_framedata_params
 
 
 class MemmapTiffSI:
@@ -76,12 +77,16 @@ class MemmapTiffSI:
         self._resolution_xyz = [0.0, 0.0, 0.0]
         self._acquisition_parameters = {}
 
-        with tifffile.TiffFile(tiff_path) as tif:
-            si_meta = tif.scanimage_metadata
-            if si_meta is not None:
-                self._si_metadata = si_meta
-            frame_data = (si_meta or {}).get('FrameData') or {}
+        # Fast SI metadata read: targeted byte-level search avoids calling
+        # matlabstr2py on the full FrameData blob. ScanImage 2023.1+ writes
+        # >20 MB FrameData (galvo waveforms, etc.) that causes matlabstr2py
+        # to hang; this path reads only the specific keys we need.
+        si_meta = read_si_framedata_params(tiff_path)
+        if si_meta is not None:
+            self._si_metadata = si_meta
+        frame_data = (si_meta or {}).get('FrameData') or {}
 
+        with tifffile.TiffFile(tiff_path) as tif:
             # Channels
             channels_saved = frame_data.get('SI.hChannels.channelSave', 1)
             if isinstance(channels_saved, (list, tuple)):
@@ -96,8 +101,13 @@ class MemmapTiffSI:
             self.height, self.width = page.shape
             self.dtype = np.dtype(page.dtype)
             self.data_offset_0 = page.dataoffsets[0]
-            offset_1 = tif.pages[1].dataoffsets[0]
-            self.stride = offset_1 - self.data_offset_0
+
+            # Stride between pages: use page 1 if it exists; otherwise fall
+            # back to the page's own byte count (single-frame file).
+            if len(tif.pages) > 1:
+                self.stride = tif.pages[1].dataoffsets[0] - self.data_offset_0
+            else:
+                self.stride = int(page.databytecounts[0])
 
             npages = get_si_tiff_n_pages(tiff_path)
 
@@ -119,8 +129,8 @@ class MemmapTiffSI:
             # Resolution: x, y from TIFF tags; z from FrameData
             self._extract_resolution(tif, frame_data)
 
-            # Acquisition parameters from FrameData
-            self._acquisition_parameters = self._extract_acquisition_parameters(frame_data)
+        # Acquisition parameters from FrameData
+        self._acquisition_parameters = self._extract_acquisition_parameters(frame_data)
 
     def _extract_resolution(self, tif, frame_data):
         """Extract resolution_xyz (x, y, z) in µm from TIFF tags and FrameData."""
