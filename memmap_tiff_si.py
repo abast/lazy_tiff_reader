@@ -62,7 +62,7 @@ class MemmapTiffSI:
     >>> mm[0, 0, 0]        # t=0, z=0, c=0: (Y, X)
     """
 
-    def __init__(self, tiff_path):
+    def __init__(self, tiff_path, allow_truncated=False):
         """
         Initialize MemmapTiffSI instance.
 
@@ -70,6 +70,10 @@ class MemmapTiffSI:
         ----------
         tiff_path : str
             Path to ScanImage TIFF file
+        allow_truncated : bool
+            If True, allow the file to have incomplete volumes at the end
+            (e.g., acquisition stopped mid-volume). Extra pages are discarded
+            and a warning is printed.
         """
         self._tiff_path = tiff_path
         self._mmap = None
@@ -123,12 +127,20 @@ class MemmapTiffSI:
             # Metadata n_volumes (SI.hStackManager.actualNumVolumes) is unreliable
             # (ScanImage writes default/garbage values for infinite acquisitions).
             pages_per_volume = n_zplanes * n_channels
+            remainder = npages % pages_per_volume
             n_volumes = npages // pages_per_volume
-            assert npages % pages_per_volume == 0, (
-                f"Page count {npages} is not divisible by "
-                f"n_zplanes={n_zplanes} * n_channels={n_channels} = {pages_per_volume}. "
-                f"File may be truncated."
-            )
+
+            if remainder != 0:
+                if allow_truncated:
+                    print(f"WARNING: {os.path.basename(tiff_path)} has {npages} pages, "
+                          f"{n_volumes} complete volumes, "
+                          f"{remainder} extra pages discarded.")
+                else:
+                    assert False, (
+                        f"Page count {npages} is not divisible by "
+                        f"n_zplanes={n_zplanes} * n_channels={n_channels} = {pages_per_volume}. "
+                        f"File may be truncated. Use allow_truncated=True to discard extra pages."
+                    )
             self.n_zplanes = n_zplanes
             self.n_volumes = n_volumes
 
