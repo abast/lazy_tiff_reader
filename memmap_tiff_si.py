@@ -118,23 +118,17 @@ class MemmapTiffSI:
             # T, Z dimensions from metadata
             n_zplanes = frame_data.get('SI.hStackManager.actualNumSlices', 1)
             n_volumes = frame_data.get('SI.hStackManager.actualNumVolumes', 0)
-            if n_volumes <= 0 or n_zplanes <= 0:
-                n_zplanes = 1
-                n_volumes = npages // n_channels
-                if npages % n_channels != 0:
-                    raise ValueError(
-                        f"Page count {npages} is not divisible by "
-                        f"n_channels={n_channels}. File may be truncated."
-                    )
-            else:
-                expected = n_volumes * n_zplanes * n_channels
-                if npages != expected:
-                    raise ValueError(
-                        f"Page count mismatch: file has {npages} pages but "
-                        f"metadata says {n_volumes}T x {n_zplanes}Z x "
-                        f"{n_channels}C = {expected}. "
-                        f"File may be truncated or metadata is wrong."
-                    )
+
+            # Always compute n_volumes from actual page count in the file.
+            # Metadata n_volumes (SI.hStackManager.actualNumVolumes) is unreliable
+            # (ScanImage writes default/garbage values for infinite acquisitions).
+            pages_per_volume = n_zplanes * n_channels
+            n_volumes = npages // pages_per_volume
+            assert npages % pages_per_volume == 0, (
+                f"Page count {npages} is not divisible by "
+                f"n_zplanes={n_zplanes} * n_channels={n_channels} = {pages_per_volume}. "
+                f"File may be truncated."
+            )
             self.n_zplanes = n_zplanes
             self.n_volumes = n_volumes
 

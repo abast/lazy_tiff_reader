@@ -33,7 +33,7 @@ over 23 MB take ~50 ms total. No matlabstr2py call needed.
 
 import re
 import struct
-from typing import Any
+from typing import Any, Dict, Optional
 
 # Vidrio's custom magic number written at bytes 16-19 of every ScanImage BigTIFF.
 # Little-endian uint32: 0x07 0x03 0x03 0x01 -> 0x01030307 = 117637889.
@@ -104,7 +104,7 @@ def _parse_si_value(raw: bytes) -> Any:
     return s
 
 
-def read_si_framedata_params(tiff_path: str) -> dict[str, Any] | None:
+def read_si_framedata_params(tiff_path: str) -> 'Optional[Dict[str, Any]]':
     """
     Read ScanImage FrameData parameters from a BigTIFF file using targeted
     byte-level search. Avoids calling matlabstr2py on the full FrameData blob,
