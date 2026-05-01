@@ -9,8 +9,8 @@ import os
 import numpy as np
 import tifffile
 from numpy.lib.stride_tricks import as_strided
-from utils.get_si_tiff_n_pages import get_si_tiff_n_pages
-from utils.read_si_framedata_params import read_si_framedata_params
+from .utils.get_si_tiff_n_pages import get_si_tiff_n_pages
+from .utils.read_si_framedata_params import read_si_framedata_params
 
 
 class MemmapTiffSI:

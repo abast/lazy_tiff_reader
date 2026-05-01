@@ -5,7 +5,7 @@ example_tiff_files['4_channel_meso3'] = '/nearline/spruston/Arco_imaging/AB34/20
 
 # test one: time GappedMemmap(example_tiff_files['4_channel_meso3'])[::2,1]
 
-import gapped_memmap
+from lazy_tiff_reader import gapped_memmap
 
 def test_can_read_fancy_indices():
     for k, v in example_tiff_files.items():
