@@ -148,7 +148,13 @@ class MemmapTiffSI:
                     self._resolution_xyz[1] = 10000.0 / (float(y_res[0]) / float(y_res[1]))
         except Exception:
             pass
-        z_step = frame_data.get('SI.hStackManager.stackZStepSize')
+        # Z-step preference order:
+        #   1. actualStackZStepSize  -- z step actually achieved during acquisition
+        #      (correct for arbitrary / fast-Z stacks where stackZStepSize is just
+        #      the *requested* step and may differ from what was scanned).
+        #   2. stackZStepSize        -- requested z step (legacy / single-actuator).
+        z_step = (frame_data.get('SI.hStackManager.actualStackZStepSize')
+                  or frame_data.get('SI.hStackManager.stackZStepSize'))
         if z_step is not None:
             try:
                 self._resolution_xyz[2] = float(z_step)
@@ -161,11 +167,20 @@ class MemmapTiffSI:
         keys = {
             'frame_rate': 'SI.hRoiManager.scanFrameRate',
             'volume_rate': 'SI.hRoiManager.scanVolumeRate',
-            'z_step_size': 'SI.hStackManager.stackZStepSize',
+            'z_step_size_requested': 'SI.hStackManager.stackZStepSize',
+            'z_step_size': 'SI.hStackManager.actualStackZStepSize',
+            'frames_per_slice': 'SI.hStackManager.framesPerSlice',
+            'num_slices_requested': 'SI.hStackManager.numSlices',
+            'num_slices': 'SI.hStackManager.actualNumSlices',
+            'stack_definition': 'SI.hStackManager.stackDefinition',
+            'stack_mode': 'SI.hStackManager.stackMode',
         }
         for name, key in keys.items():
             if key in frame_data:
                 out[name] = frame_data[key]
+        # Fall back to requested z step if actual is absent.
+        if 'z_step_size' not in out and 'z_step_size_requested' in out:
+            out['z_step_size'] = out['z_step_size_requested']
         return out
 
     def _ensure_mmap(self):

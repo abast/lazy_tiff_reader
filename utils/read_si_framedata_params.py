@@ -43,12 +43,17 @@ _SI_BIGTIFF_MAGIC = 117637889  # 0x07030301 little-endian
 # The SI parameters MemmapTiffSI uses to determine array shape and acquisition info.
 # Add to this list if you need additional keys available via arr.metadata['FrameData'].
 _SI_PARAMS = [
-    'SI.hChannels.channelSave',          # which channels were saved, e.g. [1 2]
-    'SI.hStackManager.actualNumSlices',  # Z planes per volume
-    'SI.hStackManager.actualNumVolumes', # number of volumes (T dimension)
-    'SI.hStackManager.stackZStepSize',   # µm between Z planes
-    'SI.hRoiManager.scanFrameRate',      # frames per second
-    'SI.hRoiManager.scanVolumeRate',     # volumes per second
+    'SI.hChannels.channelSave',             # which channels were saved, e.g. [1 2]
+    'SI.hStackManager.actualNumSlices',     # actual # Z planes per volume
+    'SI.hStackManager.actualNumVolumes',    # actual # volumes (T dimension)
+    'SI.hStackManager.numSlices',           # requested # Z planes
+    'SI.hStackManager.stackZStepSize',      # requested µm between Z planes
+    'SI.hStackManager.actualStackZStepSize',# achieved µm between Z planes (preferred for arbitrary/fast-Z)
+    'SI.hStackManager.framesPerSlice',      # frames acquired per Z slice
+    'SI.hStackManager.stackDefinition',     # 'uniform' / 'arbitrary'
+    'SI.hStackManager.stackMode',           # 'slow' / 'fast'
+    'SI.hRoiManager.scanFrameRate',         # frames per second
+    'SI.hRoiManager.scanVolumeRate',        # volumes per second
 ]
 
 
