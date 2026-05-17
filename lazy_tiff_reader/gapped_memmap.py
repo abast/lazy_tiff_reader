@@ -8,9 +8,9 @@ making the data appear as a contiguous numpy array without loading into RAM.
 import os
 import numpy as np
 import tifffile
-from utils.copy_byte_spans_between_buffers import copy_byte_spans_between_buffers
-from slices_to_offsets import slices_to_offsets
-from utils.get_si_tiff_n_pages import get_si_tiff_n_pages
+from .slices_to_offsets import slices_to_offsets
+from .utils.copy_byte_spans_between_buffers import copy_byte_spans_between_buffers
+from .utils.get_si_tiff_n_pages import get_si_tiff_n_pages
 
 
 class GappedMemmap:

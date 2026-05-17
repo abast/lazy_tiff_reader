@@ -9,8 +9,8 @@ import os
 import numpy as np
 import tifffile
 from numpy.lib.stride_tricks import as_strided
-from utils.get_si_tiff_n_pages import get_si_tiff_n_pages
-from utils.read_si_framedata_params import read_si_framedata_params
+from .utils.get_si_tiff_n_pages import get_si_tiff_n_pages
+from .utils.read_si_framedata_params import read_si_framedata_params
 
 
 class MemmapTiffSI:
@@ -37,12 +37,13 @@ class MemmapTiffSI:
 
     Attributes
     ----------
-    metadata : dict or None
-        Full ScanImage metadata from the TIFF (tifffile scanimage_metadata). None if not SI.
+    metadata : dict
+        ScanImage metadata from the TIFF (FrameData keys extracted via byte-level search).
     n_volumes, n_zplanes, n_channels : int
         Dimensions T, Z, C from metadata (Z=1 for 2D acquisitions).
-    resolution_xyz : tuple of float
+    resolution_xyz : tuple of (float or None)
         (x, y, z) in µm per pixel from TIFF tags and SI.hStackManager.stackZStepSize.
+        Components are None when not available in the file.
     acquisition_parameters : dict
         Key FrameData values (e.g. frame_rate, volume_rate, z_step_size).
     shape : tuple
@@ -61,7 +62,7 @@ class MemmapTiffSI:
     >>> mm[0, 0, 0]        # t=0, z=0, c=0: (Y, X)
     """
 
-    def __init__(self, tiff_path):
+    def __init__(self, tiff_path, allow_truncated=False):
         """
         Initialize MemmapTiffSI instance.
 
@@ -69,12 +70,16 @@ class MemmapTiffSI:
         ----------
         tiff_path : str
             Path to ScanImage TIFF file
+        allow_truncated : bool
+            If True, allow the file to have incomplete volumes at the end
+            (e.g., acquisition stopped mid-volume). Extra pages are discarded
+            and a warning is printed.
         """
         self._tiff_path = tiff_path
         self._mmap = None
         self._data = None
         self._si_metadata = None
-        self._resolution_xyz = [0.0, 0.0, 0.0]
+        self._resolution_xyz = [None, None, None]
         self._acquisition_parameters = {}
 
         # Fast SI metadata read: targeted byte-level search avoids calling
@@ -82,13 +87,16 @@ class MemmapTiffSI:
         # >20 MB FrameData (galvo waveforms, etc.) that causes matlabstr2py
         # to hang; this path reads only the specific keys we need.
         si_meta = read_si_framedata_params(tiff_path)
-        if si_meta is not None:
-            self._si_metadata = si_meta
-        frame_data = (si_meta or {}).get('FrameData') or {}
+        if si_meta is None:
+            raise RuntimeError(
+                f"Not a ScanImage BigTIFF file: {tiff_path}"
+            )
+        self._si_metadata = si_meta
+        frame_data = si_meta['FrameData']
 
         with tifffile.TiffFile(tiff_path) as tif:
             # Channels
-            channels_saved = frame_data.get('SI.hChannels.channelSave', 1)
+            channels_saved = frame_data['SI.hChannels.channelSave']
             if isinstance(channels_saved, (list, tuple)):
                 n_channels = len(channels_saved)
             else:
@@ -114,13 +122,25 @@ class MemmapTiffSI:
             # T, Z dimensions from metadata
             n_zplanes = frame_data.get('SI.hStackManager.actualNumSlices', 1)
             n_volumes = frame_data.get('SI.hStackManager.actualNumVolumes', 0)
-            if n_volumes <= 0 or n_zplanes <= 0:
-                n_zplanes = 1
-                n_volumes = npages // n_channels
-            else:
-                if npages != n_volumes * n_zplanes * n_channels:
-                    n_zplanes = 1
-                    n_volumes = npages // n_channels
+
+            # Always compute n_volumes from actual page count in the file.
+            # Metadata n_volumes (SI.hStackManager.actualNumVolumes) is unreliable
+            # (ScanImage writes default/garbage values for infinite acquisitions).
+            pages_per_volume = n_zplanes * n_channels
+            remainder = npages % pages_per_volume
+            n_volumes = npages // pages_per_volume
+
+            if remainder != 0:
+                if allow_truncated:
+                    print(f"WARNING: {os.path.basename(tiff_path)} has {npages} pages, "
+                          f"{n_volumes} complete volumes, "
+                          f"{remainder} extra pages discarded.")
+                else:
+                    assert False, (
+                        f"Page count {npages} is not divisible by "
+                        f"n_zplanes={n_zplanes} * n_channels={n_channels} = {pages_per_volume}. "
+                        f"File may be truncated. Use allow_truncated=True to discard extra pages."
+                    )
             self.n_zplanes = n_zplanes
             self.n_volumes = n_volumes
 
@@ -147,7 +167,7 @@ class MemmapTiffSI:
                     self._resolution_xyz[0] = 10000.0 / (float(x_res[0]) / float(x_res[1]))
                     self._resolution_xyz[1] = 10000.0 / (float(y_res[0]) / float(y_res[1]))
         except Exception:
-            pass
+            pass  # resolution stays None
         # Z-step preference order:
         #   1. actualStackZStepSize  -- z step actually achieved during acquisition
         #      (correct for arbitrary / fast-Z stacks where stackZStepSize is just
@@ -159,7 +179,7 @@ class MemmapTiffSI:
             try:
                 self._resolution_xyz[2] = float(z_step)
             except (TypeError, ValueError):
-                pass
+                pass  # z resolution stays None
 
     def _extract_acquisition_parameters(self, frame_data):
         """Extract key acquisition parameters from FrameData."""
@@ -251,10 +271,7 @@ class MemmapTiffSI:
 
     @property
     def metadata(self):
-        """
-        ScanImage metadata dict from the TIFF (parsed by tifffile from ImageDescription).
-        None if the file was not recognized as ScanImage.
-        """
+        """ScanImage metadata dict (FrameData keys extracted via byte-level search)."""
         return self._si_metadata
 
     @property
