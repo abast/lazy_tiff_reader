@@ -44,16 +44,27 @@ _SI_BIGTIFF_MAGIC = 117637889  # 0x07030301 little-endian
 # Add to this list if you need additional keys available via arr.metadata['FrameData'].
 _SI_PARAMS = [
     'SI.hChannels.channelSave',             # which channels were saved, e.g. [1 2]
-    'SI.hStackManager.actualNumSlices',     # actual # Z planes per volume
+    'SI.hStackManager.actualNumSlices',     # actual # Z planes per volume (excl. flyback)
     'SI.hStackManager.actualNumVolumes',    # actual # volumes (T dimension)
     'SI.hStackManager.numSlices',           # requested # Z planes
     'SI.hStackManager.stackZStepSize',      # requested µm between Z planes
     'SI.hStackManager.actualStackZStepSize',# achieved µm between Z planes (preferred for arbitrary/fast-Z)
     'SI.hStackManager.framesPerSlice',      # frames acquired per Z slice
+    'SI.hStackManager.numFramesPerVolume',          # real frames per volume per channel
+    'SI.hStackManager.numFramesPerVolumeWithFlyback',# real + flyback pages per volume per channel
     'SI.hStackManager.stackDefinition',     # 'uniform' / 'arbitrary'
     'SI.hStackManager.stackMode',           # 'slow' / 'fast'
     'SI.hRoiManager.scanFrameRate',         # frames per second
     'SI.hRoiManager.scanVolumeRate',        # volumes per second
+    # FastZ flyback. ScanImage's discardFlybackFrames flag is NOT reliable
+    # (it's True even when flyback frames are still written to disk on some
+    # configurations). MemmapTiffSI prefers numFramesPerVolumeWithFlyback as
+    # the source of truth for on-disk per-volume page count; the keys below
+    # are kept for legacy SI versions / diagnostics.
+    'SI.hFastZ.enable',                     # FastZ on/off
+    'SI.hFastZ.discardFlybackFrames',       # UNRELIABLE - see comment above
+    'SI.hFastZ.numDiscardFlybackFrames',    # # flyback frames per Z cycle
+    'SI.hFastZ.waveformType',               # 'step' / 'sawtooth'
 ]
 
 
