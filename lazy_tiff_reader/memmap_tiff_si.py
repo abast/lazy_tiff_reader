@@ -40,14 +40,20 @@ class MemmapTiffSI:
     metadata : dict
         ScanImage metadata from the TIFF (FrameData keys extracted via byte-level search).
     n_volumes, n_zplanes, n_channels : int
-        Dimensions T, Z, C from metadata (Z=1 for 2D acquisitions).
+        Dimensions T, Z, C from metadata (Z=1 for 2D acquisitions). ``n_zplanes``
+        is the count of *real* Z planes; flyback frames are excluded.
+    n_flyback_frames : int
+        Number of FastZ flyback frames per volume that are stored on disk
+        (0 when FastZ is off or the scanner discarded them before saving).
+        These frames are skipped automatically by the strided view so they
+        are not visible through ``mm[...]`` indexing.
     resolution_xyz : tuple of (float or None)
         (x, y, z) in µm per pixel from TIFF tags and SI.hStackManager.stackZStepSize.
         Components are None when not available in the file.
     acquisition_parameters : dict
         Key FrameData values (e.g. frame_rate, volume_rate, z_step_size).
     shape : tuple
-        Shape of the data array (T, Z, C, Y, X)
+        Shape of the data array (T, Z, C, Y, X) - flyback frames excluded.
     dtype : np.dtype
         Data type of the image data
     ndim : int
@@ -121,12 +127,33 @@ class MemmapTiffSI:
 
             # T, Z dimensions from metadata
             n_zplanes = frame_data.get('SI.hStackManager.actualNumSlices', 1)
-            n_volumes = frame_data.get('SI.hStackManager.actualNumVolumes', 0)
+
+            # On-disk pages per volume per channel. ScanImage writes this
+            # explicitly as numFramesPerVolumeWithFlyback in recent versions
+            # (>= 2023.x); it is the authoritative count that always matches
+            # the file layout. The SI.hFastZ.discardFlybackFrames boolean is
+            # NOT reliable -- in some configurations it reports True even
+            # though flyback frames are still written to disk.
+            #
+            # Fall back to numFramesPerVolume (sans flyback) or actualNumSlices
+            # for legacy SI files that don't write the *WithFlyback key.
+            pages_per_z_cycle = frame_data.get(
+                'SI.hStackManager.numFramesPerVolumeWithFlyback'
+            )
+            if pages_per_z_cycle is None:
+                # Legacy heuristic: trust numDiscardFlybackFrames when FastZ is on.
+                fastz_enable = bool(frame_data.get('SI.hFastZ.enable', False))
+                n_flyback_meta = int(
+                    frame_data.get('SI.hFastZ.numDiscardFlybackFrames', 0) or 0
+                )
+                pages_per_z_cycle = n_zplanes + (n_flyback_meta if fastz_enable else 0)
+            pages_per_z_cycle = int(pages_per_z_cycle)
+            self.n_flyback_frames = max(0, pages_per_z_cycle - n_zplanes)
 
             # Always compute n_volumes from actual page count in the file.
             # Metadata n_volumes (SI.hStackManager.actualNumVolumes) is unreliable
             # (ScanImage writes default/garbage values for infinite acquisitions).
-            pages_per_volume = n_zplanes * n_channels
+            pages_per_volume = pages_per_z_cycle * n_channels
             remainder = npages % pages_per_volume
             n_volumes = npages // pages_per_volume
 
@@ -137,13 +164,16 @@ class MemmapTiffSI:
                           f"{remainder} extra pages discarded.")
                 else:
                     assert False, (
-                        f"Page count {npages} is not divisible by "
-                        f"n_zplanes={n_zplanes} * n_channels={n_channels} = {pages_per_volume}. "
+                        f"Page count {npages} is not divisible by pages_per_volume="
+                        f"(n_zplanes={n_zplanes} + n_flyback={n_flyback}) "
+                        f"* n_channels={n_channels} = {pages_per_volume}. "
                         f"File may be truncated. Use allow_truncated=True to discard extra pages."
                     )
             self.n_zplanes = n_zplanes
             self.n_volumes = n_volumes
+            self._pages_per_z_cycle = pages_per_z_cycle  # used by strided view
 
+            # User-facing shape excludes flyback (real Z planes only).
             self._shape = (n_volumes, n_zplanes, n_channels, self.height, self.width)
 
             # Resolution: x, y from TIFF tags; z from FrameData
@@ -192,8 +222,12 @@ class MemmapTiffSI:
             'frames_per_slice': 'SI.hStackManager.framesPerSlice',
             'num_slices_requested': 'SI.hStackManager.numSlices',
             'num_slices': 'SI.hStackManager.actualNumSlices',
+            'num_frames_per_volume': 'SI.hStackManager.numFramesPerVolume',
             'stack_definition': 'SI.hStackManager.stackDefinition',
             'stack_mode': 'SI.hStackManager.stackMode',
+            'fastz_enable': 'SI.hFastZ.enable',
+            'fastz_discard_flyback_frames': 'SI.hFastZ.discardFlybackFrames',
+            'fastz_num_discard_flyback_frames': 'SI.hFastZ.numDiscardFlybackFrames',
         }
         for name, key in keys.items():
             if key in frame_data:
@@ -216,7 +250,14 @@ class MemmapTiffSI:
             )
 
     def _create_strided_view(self):
-        """Create 5D strided view (T, Z, C, Y, X). Page order: t*Z*C + z*C + c."""
+        """Create 5D strided view (T, Z, C, Y, X). Page order within one volume:
+        for z in range(Z + n_flyback): for c in range(C): page.
+
+        The view stride along T jumps over a full Z cycle (real planes + any
+        FastZ flyback frames) so that ``mm[t]`` always lands on the first real
+        plane of volume ``t``. The final view is then sliced to ``[:, :Z]`` so
+        flyback frames are unreachable through the user-facing shape.
+        """
         self._ensure_mmap()
 
         if self._data is not None:
@@ -226,22 +267,28 @@ class MemmapTiffSI:
         dtype_offset = self.data_offset_0 // self.dtype.itemsize
         itemsize = self.dtype.itemsize
         T, Z, C, H, W = self._shape
-        stride_page = self.stride  # bytes per page
+        Z_total = self._pages_per_z_cycle    # Z + n_flyback_frames
+        stride_page = self.stride            # bytes per page
 
-        # Strides in bytes: [t, z, c, y, x] -> page k = t*Z*C + z*C + c, then y, x within page
+        # Strides in bytes: [t, z, c, y, x]
+        # page k within volume = z*C + c (z indexed across the FULL Z cycle, incl. flyback)
+        # next volume starts Z_total*C pages later
         strides = (
-            Z * C * stride_page,
+            Z_total * C * stride_page,
             C * stride_page,
             stride_page,
             W * itemsize,
             itemsize,
         )
-        self._data = as_strided(
+        full_view = as_strided(
             mmap_as_dtype[dtype_offset:],
-            shape=self._shape,
+            shape=(T, Z_total, C, H, W),
             strides=strides,
             writeable=False,
         )
+        # Drop the trailing flyback frames; same strides, shrunk Z extent.
+        # When n_flyback_frames == 0 this is a no-op.
+        self._data = full_view[:, :Z]
 
     def __getitem__(self, key):
         """
