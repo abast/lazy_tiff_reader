@@ -165,7 +165,7 @@ class MemmapTiffSI:
                 else:
                     assert False, (
                         f"Page count {npages} is not divisible by pages_per_volume="
-                        f"(n_zplanes={n_zplanes} + n_flyback={n_flyback}) "
+                        f"(n_zplanes={n_zplanes} + n_flyback={self.n_flyback_frames}) "
                         f"* n_channels={n_channels} = {pages_per_volume}. "
                         f"File may be truncated. Use allow_truncated=True to discard extra pages."
                     )
