@@ -79,12 +79,30 @@ _SI_PARAMS = [
     # MROI geometry. Scanfield tiles are concatenated along Y with flyto blank
     # lines between them; these convert RoiData's normalized units to microns
     # and give the inter-tile gap as round(flytoTimePerScanfield / linePeriod).
-    'SI.objectiveResolution',               # um per normalized scan unit
+    'SI.objectiveResolution',               # um per DEGREE of scan angle (161.275 on meso4)
     'SI.hScan2D.flytoTimePerScanfield',     # seconds spent moving between tiles
     'SI.hRoiManager.linePeriod',            # seconds per scanned line
     'SI.hScan2D.lineAverageFactor',         # lines averaged into one stored line
     'SI.hScan2D.LineAveragingLineCount',    # same, older SI spelling
     'SI.hAcq.lineAverageFactor',            # same, older SI spelling
+    # The inter-tile gap applies only on a RESONANT scanner: SI's own
+    # FrameScanDataView and getMroiFrameSequence multiply it by an isResonant
+    # guard (getMroiDataFromTiff omits the guard -- an inconsistency among SI's
+    # three loaders). scanMode is the modern field, scannerType the legacy one.
+    'SI.hScan2D.scanMode',                  # 'resonant' / 'linear'
+    'SI.hScan2D.scannerType',               # 'RGG' / 'Resonant' (legacy files)
+    # scanFramePeriod + flybackTimePerFrame give an INDEPENDENT check on the
+    # inter-tile gap, and are what resolved the 50-vs-48 disagreement:
+    #   scanFramePeriod / linePeriod
+    #     == sum(tile_scan_lines) + (n-1)*gap + frame_flyback_lines
+    # holds exactly (358 / 608 / 858 line periods at 1 / 2 / 3 tiles) only when
+    # both transits round UP to an EVEN number of line periods. See
+    # analysis/core/mroi_layout.py::scan_lines_for_transit.
+    'SI.hRoiManager.scanFramePeriod',       # seconds per frame (all tiles + flyback)
+    'SI.hScan2D.flybackTimePerFrame',       # seconds of frame flyback
+    # MROI is on in every meso4 configuration, including single-ROI ones, which
+    # is why linesPerFrame / pixelsPerLine can never be trusted on this rig.
+    'SI.hRoiManager.mroiEnable',            # 1 when tiles are concatenated on one page
 ]
 
 # Per-actuator acquisition line annotations, e.g.
