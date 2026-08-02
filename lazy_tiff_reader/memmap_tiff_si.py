@@ -26,6 +26,44 @@ class UnknownLayoutError(ValueError):
     """
 
 
+def check_layout_readable(tiff_path):
+    """Raise :class:`UnknownLayoutError` if this file's page layout is undeterminable.
+
+    Header-only, so it is cheap enough to call before deciding HOW to read a
+    file -- including on paths that then bypass :class:`MemmapTiffSI` entirely.
+
+    That matters because the refusal is a property of the FILE, not of the
+    reading strategy. `analysis.sources.TiffSource` accepts explicit
+    n_planes/n_channels and used to skip MemmapTiffSI whenever they were given,
+    so `--n-planes 1` on a straddling-average file opened cleanly and delivered
+    every page as a frame -- the same file answering two opposite ways depending
+    on one CLI flag. Telling the reader the grouping you want does not make
+    contaminated pages readable.
+
+    Silently returns for a non-ScanImage TIFF: there is no SI layout to
+    contradict, so the caller's own layout is its business.
+    """
+    meta = read_si_framedata_params(tiff_path)
+    if meta is None:
+        return
+    fd = meta.get('FrameData') or {}
+    avg = int(fd.get('SI.hScan2D.logAverageFactor', 1) or 1)
+    if avg <= 1:
+        return
+    wf = int(fd.get('SI.hStackManager.numFramesPerVolumeWithFlyback', 0) or 0)
+    nfpv = int(fd.get('SI.hStackManager.numFramesPerVolume', 0) or 0)
+    if (wf and wf % avg) or (nfpv and nfpv % avg):
+        raise UnknownLayoutError(
+            f"{os.path.basename(str(tiff_path))}: logAverageFactor {avg} does "
+            f"not divide numFramesPerVolumeWithFlyback {wf} / "
+            f"numFramesPerVolume {nfpv}. Averaged pages straddle volume "
+            f"boundaries -- one page blends this volume's flyback frame with "
+            f"the next volume's first real frame -- so per-volume data is NOT "
+            f"recoverable from this file, under ANY layout. Re-acquire with an "
+            f"averaging factor that divides the volume, or with averaging off."
+        )
+
+
 class MemmapTiffSI:
     """
     Zero-copy memory-mapped access to ScanImage TIFF files using stride tricks.
@@ -184,6 +222,9 @@ class MemmapTiffSI:
             # ACQUIRED frames, so the counts above are frames, not pages.
             avg = int(frame_data.get('SI.hScan2D.logAverageFactor', 1) or 1)
             avg = max(1, avg)
+            # One rule, one place: check_layout_readable above is what the
+            # explicit-layout callers use too.
+            check_layout_readable(tiff_path)
             if avg > 1 and (pages_per_z_cycle % avg or real_frames_per_volume % avg):
                 # Averaging is applied to the raw frame stream with no regard for
                 # volume boundaries. When the factor does not divide the volume,
