@@ -1,5 +1,5 @@
 """
-Fast extraction of ScanImage BigTIFF parameters without full matlabstr2py parse.
+Fast extraction of ScanImage BigTIFF metadata without a full matlabstr2py parse.
 
 Background
 ----------
@@ -19,18 +19,23 @@ FrameData contains non-varying SI acquisition parameters as MATLAB-style text, e
     SI.hStackManager.actualNumSlices = 9
     ...
 
+RoiData is the JSON MROI scanfield description, ``{"RoiGroups": {...}}``, giving
+each ROI's centerXY / sizeXY / pixelResolutionXY. MROI callers need it together
+with the FrameData keys, so both blocks are parsed here.
+
 Problem: since commit 35b375b ("Add XROI properties to hSI"), XROI stores its
 full per-frame scan waveforms (galvo XY, beam B/Bpb, FastZ) in hSI.xroiProps
 before each acquisition. Because xroiProps is a SetObservable SI model property,
-mdlGetHeaderString() includes it in FrameData — ballooning it from ~18 KB to
-~23 MB. tifffile's read_scanimage_metadata() passes the entire blob to
-matlabstr2py(), which hangs on 20+ MB of input.
+mdlGetHeaderString() includes it in FrameData - ballooning it from ~18 KB to
+100+ MB. tifffile's read_scanimage_metadata() passes the entire blob to
+matlabstr2py(), which hangs on that much input.
 
-Fix: read the raw FrameData bytes ourselves and regex-search for only the
-specific keys MemmapTiffSI needs. I/O for 23 MB takes ~7 ms; 6 regex passes
-over 23 MB take ~50 ms total. No matlabstr2py call needed.
+Fix: read the raw FrameData and RoiData bytes ourselves, then pull out only the
+keys callers need in a single regex pass. On a 163 MB blob the read takes
+~0.2 s and the scan ~1 s; matlabstr2py on the same blob never returns.
 """
 
+import json
 import re
 import struct
 from typing import Any, Dict, Optional
@@ -47,8 +52,8 @@ _SI_PARAMS = [
     'SI.hStackManager.actualNumSlices',     # actual # Z planes per volume (excl. flyback)
     'SI.hStackManager.actualNumVolumes',    # actual # volumes (T dimension)
     'SI.hStackManager.numSlices',           # requested # Z planes
-    'SI.hStackManager.stackZStepSize',      # requested µm between Z planes
-    'SI.hStackManager.actualStackZStepSize',# achieved µm between Z planes (preferred for arbitrary/fast-Z)
+    'SI.hStackManager.stackZStepSize',      # requested um between Z planes
+    'SI.hStackManager.actualStackZStepSize',# achieved um between Z planes (preferred for arbitrary/fast-Z)
     'SI.hStackManager.framesPerSlice',      # frames acquired per Z slice
     'SI.hStackManager.numFramesPerVolume',          # real frames per volume per channel
     'SI.hStackManager.numFramesPerVolumeWithFlyback',# real + flyback pages per volume per channel
@@ -65,10 +70,26 @@ _SI_PARAMS = [
     'SI.hFastZ.discardFlybackFrames',       # UNRELIABLE - see comment above
     'SI.hFastZ.numDiscardFlybackFrames',    # # flyback frames per Z cycle
     'SI.hFastZ.waveformType',               # 'step' / 'sawtooth'
+    # MROI geometry. Scanfield tiles are concatenated along Y with flyto blank
+    # lines between them; these convert RoiData's normalized units to microns
+    # and give the inter-tile gap as round(flytoTimePerScanfield / linePeriod).
+    'SI.objectiveResolution',               # um per normalized scan unit
+    'SI.hScan2D.flytoTimePerScanfield',     # seconds spent moving between tiles
+    'SI.hRoiManager.linePeriod',            # seconds per scanned line
+    'SI.hScan2D.lineAverageFactor',         # lines averaged into one stored line
+    'SI.hScan2D.LineAveragingLineCount',    # same, older SI spelling
+    'SI.hAcq.lineAverageFactor',            # same, older SI spelling
 ]
 
+# Per-actuator acquisition line annotations, e.g.
+# 'SI.xroiProps.Annotations.Beam.LineStart'. These mark which stored lines were
+# actually being acquired (vs. blank flyback), so MROI callers can mask them out.
+# Matched generically so any actuator name works; the sibling xroiProps waveform
+# blobs -- the reason FrameData is so large -- are deliberately left unparsed.
+_ANNOTATION_PATTERN = rb'SI\.xroiProps\.Annotations\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+'
 
-def _parse_si_value(raw: bytes) -> Any:
+
+def _parse_si_value(raw: bytes, unwrap_single: bool = True) -> Any:
     """
     Parse a single MATLAB-style value from the raw bytes of one assignment's RHS.
 
@@ -79,6 +100,10 @@ def _parse_si_value(raw: bytes) -> Any:
                                treated as flat list here since we only need 1D params)
       42 / 3.14             -> Python int or float
       anything else         -> str as-is
+
+    ``unwrap_single`` collapses a one-element list to a scalar (e.g.
+    actualNumSlices = [9] -> 9). Callers that index the result as an array --
+    the xroiProps annotations -- pass False to keep it a list.
     """
     s = raw.decode('ascii', errors='replace').strip()
 
@@ -105,8 +130,9 @@ def _parse_si_value(raw: bytes) -> Any:
                     values.append(float(t))
                 except ValueError:
                     values.append(t)
-        # Unwrap single-element lists to a scalar (e.g. actualNumSlices = [9] -> 9)
-        return values if len(values) != 1 else values[0]
+        if unwrap_single and len(values) == 1:
+            return values[0]
+        return values
 
     try:
         return int(s)
@@ -120,24 +146,12 @@ def _parse_si_value(raw: bytes) -> Any:
     return s
 
 
-def read_si_framedata_params(tiff_path: str) -> 'Optional[Dict[str, Any]]':
+def _read_si_blocks(tiff_path: str) -> 'Optional[tuple]':
     """
-    Read ScanImage FrameData parameters from a BigTIFF file using targeted
-    byte-level search. Avoids calling matlabstr2py on the full FrameData blob,
-    which hangs for ScanImage files where xroiProps has been populated with
-    waveform data (>20 MB).
+    Read the raw FrameData and RoiData blocks from a ScanImage BigTIFF.
 
-    Parameters
-    ----------
-    tiff_path : str
-        Path to ScanImage BigTIFF file.
-
-    Returns
-    -------
-    dict or None
-        {'FrameData': {key: value, ...}, 'version': 3|4}
-        Same structure as tifffile's scanimage_metadata, but containing only
-        the keys listed in _SI_PARAMS. Returns None for non-ScanImage files.
+    Returns ``(frame_raw, roi_raw, version)``, or None if the file is not a
+    ScanImage BigTIFF.
     """
     try:
         with open(tiff_path, 'rb') as f:
@@ -163,26 +177,71 @@ def read_si_framedata_params(tiff_path: str) -> 'Optional[Dict[str, Any]]':
             if magic != _SI_BIGTIFF_MAGIC or version not in (3, 4):
                 return None
 
-            # ---- FrameData block (bytes 32 .. 32+size0) ----
-            # Contains all non-varying SI acquisition parameters as MATLAB-style
-            # key = value text, one assignment per line, null-terminated.
-            # In files with xroiProps populated, this is ~23 MB of text because
-            # the full galvo/beam waveforms are serialized here as float arrays.
-            # Reading 23 MB sequentially takes ~7 ms on a local or USB drive.
+            # ---- FrameData, then RoiData, back to back from byte 32 ----
+            # In files with xroiProps populated FrameData is 100+ MB of text
+            # because the full galvo/beam waveforms are serialized there.
+            # Reading it sequentially is fast; only parsing it is not.
             f.seek(32)
-            raw = f.read(size0)
+            frame_raw = f.read(size0)
+            roi_raw = f.read(size1)
     except OSError:
         return None
 
+    return frame_raw, roi_raw, version
+
+
+def read_si_framedata_params(tiff_path: str) -> 'Optional[Dict[str, Any]]':
+    """
+    Read ScanImage metadata from a BigTIFF using targeted byte-level search.
+    Avoids calling matlabstr2py on the full FrameData blob, which hangs for
+    ScanImage files where xroiProps has been populated with waveform data.
+
+    Parameters
+    ----------
+    tiff_path : str
+        Path to ScanImage BigTIFF file.
+
+    Returns
+    -------
+    dict or None
+        ``{'FrameData': {key: value, ...}, 'RoiGroups': {...}, 'version': 3|4}``
+        Same structure as tifffile's scanimage_metadata, but FrameData holds
+        only the keys in _SI_PARAMS plus any xroiProps line annotations.
+        ``RoiGroups`` is absent when the file has no RoiData block.
+        Returns None for non-ScanImage files.
+    """
+    blocks = _read_si_blocks(tiff_path)
+    if blocks is None:
+        return None
+    frame_raw, roi_raw, version = blocks
+
     # ---- Targeted parameter extraction ----
     # Instead of parsing the full MATLAB struct (which hangs matlabstr2py on
-    # large inputs), regex-search the raw bytes once per needed key.
-    # Pattern: b'SI.hChannels.channelSave = <capture everything to end of line>'
-    frame_data: dict[str, Any] = {}
-    for key in _SI_PARAMS:
-        pattern = re.escape(key).encode() + rb'[ \t]*=[ \t]*([^\n\r]+)'
-        m = re.search(pattern, raw)
-        if m:
-            frame_data[key] = _parse_si_value(m.group(1).rstrip())
+    # large inputs), scan the raw bytes ONCE for every key of interest. A pass
+    # per key would mean re-scanning 100+ MB a few dozen times, and any key
+    # absent from the file costs a full scan on its own.
+    wanted = b'|'.join(re.escape(key).encode() for key in _SI_PARAMS)
+    pattern = (rb'^(' + wanted + rb'|' + _ANNOTATION_PATTERN
+               + rb')[ \t]*=[ \t]*([^\n\r]*)')
 
-    return {'FrameData': frame_data, 'version': version}
+    frame_data: Dict[str, Any] = {}
+    for m in re.finditer(pattern, frame_raw, re.MULTILINE):
+        key = m.group(1).decode('ascii')
+        frame_data[key] = _parse_si_value(
+            m.group(2).rstrip(),
+            unwrap_single='.Annotations.' not in key,
+        )
+
+    result: Dict[str, Any] = {'FrameData': frame_data, 'version': version}
+
+    # ---- MROI scanfield geometry (RoiData JSON) ----
+    # Null-terminated like FrameData; trailing padding is not valid JSON.
+    if roi_raw:
+        try:
+            roi_meta = json.loads(roi_raw.split(b'\x00', 1)[0].decode('utf-8'))
+        except (ValueError, UnicodeDecodeError):
+            roi_meta = None
+        if isinstance(roi_meta, dict):
+            result.update(roi_meta)
+
+    return result

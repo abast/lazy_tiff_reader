@@ -11,6 +11,7 @@ import tifffile
 from .slices_to_offsets import slices_to_offsets
 from .utils.copy_byte_spans_between_buffers import copy_byte_spans_between_buffers
 from .utils.get_si_tiff_n_pages import get_si_tiff_n_pages
+from .utils.read_si_framedata_params import read_si_framedata_params
 
 
 class GappedMemmap:
@@ -100,7 +101,9 @@ class GappedMemmap:
         - Calculates page count from file size instead of len(tif.pages) (~170ms saved)
         - Generates offsets from pattern instead of iterating pages (~360ms saved)
         """
-        si_meta = tif.scanimage_metadata
+        # Targeted header read; tif.scanimage_metadata would hand the whole
+        # (100+ MB, xroiProps-inflated) FrameData blob to matlabstr2py.
+        si_meta = read_si_framedata_params(tiff_path)
         frame_data = si_meta['FrameData']
         channels_saved = frame_data['SI.hChannels.channelSave']
         # Handle both single channel (int) and multi-channel (list)
@@ -154,9 +157,9 @@ class GappedMemmap:
             # Choose metadata extraction method
             if method == 'auto':
                 # Try ScanImage fast path first
-                if (hasattr(tif, 'scanimage_metadata') and tif.scanimage_metadata and
-                    'FrameData' in tif.scanimage_metadata and
-                    'SI.hChannels.channelSave' in tif.scanimage_metadata['FrameData']):
+                _si_meta = read_si_framedata_params(tiff_path)
+                if (_si_meta and 'FrameData' in _si_meta and
+                        'SI.hChannels.channelSave' in _si_meta['FrameData']):
                     final_shape, nchannels, offsets, sizes, axes = self._get_metadata_from_scanimage(
                         tif, tiff_path, page_shape
                     )
