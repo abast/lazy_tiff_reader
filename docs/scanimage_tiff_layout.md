@@ -1512,9 +1512,27 @@ tests:    mesotools/sync/tests/test_si_frames_corpus.py     page -> volume
                                                              the explicit-layout path
           mesotools/analysis/tests/test_mroi_corpus.py      MROI tiles + placement
           mesotools/analysis/tests/test_mroi_layout.py      MROI geometry (no corpus)
+          mesotools/sync/tests/test_corpus_audit.py         the corpus is COMPLETE
 re-acquire: python sync/acquire_corpus.py --volumes 3
             python sync/acquire_corpus.py --list
+audit:      python sync/acquire_corpus.py --audit             # no rig needed
+            python sync/acquire_corpus.py --migrate-manifest  # v1 -> v2, no rig
 ```
+
+**Check `--audit` before trusting a green corpus run.** Every manifest-driven
+test is parametrized over `manifest.json`, so a manifest listing fewer cases than
+the corpus holds does not fail -- it runs fewer tests and passes. That happened:
+a single `--only` run rewrote the manifest wholesale, taking it from 17 cases to
+1, and the suite stayed green while covering a fraction of the data. Skipping
+when the corpus is ABSENT is correct; passing when it is PARTIAL is not.
+
+Three things now prevent a recurrence:
+
+| guard | what it catches |
+|---|---|
+| `acquire_corpus.py` merges by case name, never replaces | the write that caused it |
+| manifest schema v2 (`known_cases`, `acquired_at`, no top-level `volumes_per_case`) | a truncated manifest is self-detectable, and merged entries carry provenance |
+| `test_si_frames_corpus.py` coverage guards + `test_corpus_audit.py` | data on disk the manifest omits, defined-but-unacquired cases, orphaned entries -- and the detector itself is tested against deliberately broken synthetic corpora |
 
 Run with the full py311 interpreter:
 
