@@ -34,9 +34,11 @@ the submodule to `PYTHONPATH`, which made the shadow copy win over everything.
 
 ## Three things that will surprise you
 
-Read
-[`mesotools/docs/scanimage_tiff_layout.md`](../mesotools/docs/scanimage_tiff_layout.md)
-before changing any arithmetic here. It is the authoritative, measurement-backed
+Read [`docs/scanimage_tiff_layout.md`](docs/scanimage_tiff_layout.md) before
+changing any arithmetic here -- it ships with this repo, so a standalone clone
+has it. (It is mirrored from `mesotools/docs/`, which is canonical because the
+corpus and the tests live there; `mesotools/sync/sync_layout_doc.py` resyncs it
+and a test fails if the two drift.) It is the authoritative, measurement-backed
 reference for how ScanImage pages map to volumes, verified against a 25-case
 acquisition corpus. Summary of the traps this reader exists to handle:
 
