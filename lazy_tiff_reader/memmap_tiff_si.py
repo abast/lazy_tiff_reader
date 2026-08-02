@@ -13,6 +13,19 @@ from .utils.get_si_tiff_n_pages import get_si_tiff_n_pages
 from .utils.read_si_framedata_params import read_si_framedata_params
 
 
+class UnknownLayoutError(ValueError):
+    """The file is a ScanImage TIFF, but its page layout cannot be determined.
+
+    Distinct from "not a ScanImage file" (RuntimeError) and from "stopped
+    mid-volume" (the allow_truncated path). Callers that fall back to a flat
+    page stream on failure MUST let this one propagate: degrading here means
+    silently presenting pages as if they were volumes, which is precisely the
+    class of silent wrongness this reader exists to prevent.
+
+    Subclasses ValueError so existing `except ValueError` handlers still work.
+    """
+
+
 class MemmapTiffSI:
     """
     Zero-copy memory-mapped access to ScanImage TIFF files using stride tricks.
@@ -137,6 +150,9 @@ class MemmapTiffSI:
             #
             # Fall back to numFramesPerVolume (sans flyback) or actualNumSlices
             # for legacy SI files that don't write the *WithFlyback key.
+            frames_per_slice = int(
+                frame_data.get('SI.hStackManager.framesPerSlice', 1) or 1)
+
             pages_per_z_cycle = frame_data.get(
                 'SI.hStackManager.numFramesPerVolumeWithFlyback'
             )
@@ -146,9 +162,51 @@ class MemmapTiffSI:
                 n_flyback_meta = int(
                     frame_data.get('SI.hFastZ.numDiscardFlybackFrames', 0) or 0
                 )
-                pages_per_z_cycle = n_zplanes + (n_flyback_meta if fastz_enable else 0)
+                pages_per_z_cycle = (n_zplanes * frames_per_slice
+                                     + (n_flyback_meta if fastz_enable else 0))
             pages_per_z_cycle = int(pages_per_z_cycle)
-            self.n_flyback_frames = max(0, pages_per_z_cycle - n_zplanes)
+
+            # REAL (non-flyback) frames per volume. numFramesPerVolume is
+            # numel(hStackManager.zs), so framesPerSlice is already baked in:
+            # a 3-plane 2-frames-per-slice stack has zs = [z1 z1 z2 z2 z3 z3]
+            # and numFramesPerVolume = 6. This is the same derivation ScanImage
+            # itself uses (+scanimage/+util/+private/extractHeaderData.m:53).
+            #
+            # The previous code used n_zplanes here, omitting framesPerSlice, so
+            # every per-slice repeat was misclassified as FLYBACK and silently
+            # dropped: a framesPerSlice=3 acquisition exposed 1 frame of every 3.
+            real_frames_per_volume = int(
+                frame_data.get('SI.hStackManager.numFramesPerVolume',
+                               n_zplanes * frames_per_slice)
+                or n_zplanes * frames_per_slice)
+
+            # Frame averaging: ScanImage writes ONE page per logAverageFactor
+            # ACQUIRED frames, so the counts above are frames, not pages.
+            avg = int(frame_data.get('SI.hScan2D.logAverageFactor', 1) or 1)
+            avg = max(1, avg)
+            if avg > 1 and (pages_per_z_cycle % avg or real_frames_per_volume % avg):
+                # Averaging is applied to the raw frame stream with no regard for
+                # volume boundaries. When the factor does not divide the volume,
+                # averaged pages STRADDLE volume boundaries and there is no page
+                # grouping that recovers a volume -- measured: fpzc=5, avg=4 puts
+                # pages on raw frames 4, 8, 12 while volumes start at 1, 6, 11.
+                # Refuse. allow_truncated must never paper over this: it means
+                # "the acquisition stopped mid-volume", not "I cannot read this".
+                raise UnknownLayoutError(
+                    f"{os.path.basename(tiff_path)}: logAverageFactor {avg} does "
+                    f"not divide numFramesPerVolumeWithFlyback "
+                    f"{pages_per_z_cycle} / numFramesPerVolume "
+                    f"{real_frames_per_volume}. Averaged pages straddle volume "
+                    f"boundaries, so per-volume data is NOT recoverable from "
+                    f"this file. Re-acquire with an averaging factor that "
+                    f"divides the volume, or with averaging off."
+                )
+            pages_per_z_cycle //= avg
+            real_frames_per_volume //= avg
+
+            self.log_average_factor = avg
+            self.frames_per_slice = frames_per_slice
+            self.n_flyback_frames = max(0, pages_per_z_cycle - real_frames_per_volume)
 
             # Always compute n_volumes from actual page count in the file.
             # Metadata n_volumes (SI.hStackManager.actualNumVolumes) is unreliable
@@ -165,7 +223,8 @@ class MemmapTiffSI:
                 else:
                     assert False, (
                         f"Page count {npages} is not divisible by pages_per_volume="
-                        f"(n_zplanes={n_zplanes} + n_flyback={self.n_flyback_frames}) "
+                        f"(real_frames={real_frames_per_volume} + "
+                        f"n_flyback={self.n_flyback_frames}) "
                         f"* n_channels={n_channels} = {pages_per_volume}. "
                         f"File may be truncated. Use allow_truncated=True to discard extra pages."
                     )
@@ -173,8 +232,15 @@ class MemmapTiffSI:
             self.n_volumes = n_volumes
             self._pages_per_z_cycle = pages_per_z_cycle  # used by strided view
 
-            # User-facing shape excludes flyback (real Z planes only).
-            self._shape = (n_volumes, n_zplanes, n_channels, self.height, self.width)
+            # User-facing shape excludes flyback. Dimension 1 is every REAL frame
+            # in the volume, i.e. n_zplanes * framesPerSlice (post-averaging) --
+            # NOT n_zplanes. With framesPerSlice > 1 the repeats at one depth are
+            # real data and sit consecutively, plane-major: for 3 planes x 2
+            # frames the order is z1 z1 z2 z2 z3 z3 (confirmed against
+            # hStackManager.zs). Reshape with (n_zplanes, frames_per_slice) to
+            # separate depth from repeat.
+            self._shape = (n_volumes, real_frames_per_volume, n_channels,
+                           self.height, self.width)
 
             # Resolution: x, y from TIFF tags; z from FrameData
             self._extract_resolution(tif, frame_data)

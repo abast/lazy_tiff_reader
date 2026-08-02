@@ -59,6 +59,12 @@ _SI_PARAMS = [
     'SI.hStackManager.numFramesPerVolumeWithFlyback',# real + flyback pages per volume per channel
     'SI.hStackManager.stackDefinition',     # 'uniform' / 'arbitrary'
     'SI.hStackManager.stackMode',           # 'slow' / 'fast'
+    # FRAME averaging (distinct from the LINE averaging keys further down).
+    # ScanImage writes ONE page per logAverageFactor ACQUIRED frames, so every
+    # frame count above is in frames, not pages, and must be divided by this to
+    # get a page count. Its absence from this whitelist is why MemmapTiffSI
+    # silently never divided: .get() returned the default of 1 on every file.
+    'SI.hScan2D.logAverageFactor',          # acquired frames averaged into one page
     'SI.hRoiManager.scanFrameRate',         # frames per second
     'SI.hRoiManager.scanVolumeRate',        # volumes per second
     # FastZ flyback. ScanImage's discardFlybackFrames flag is NOT reliable

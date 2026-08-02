@@ -35,21 +35,41 @@ def truncated_path():
     return TRUNCATED_TIFF
 
 
-def test_truncated_default_raises_assertion_not_nameerror(truncated_path):
-    """Default ctor on a truncated file raises AssertionError naming allow_truncated.
+def test_refusal_is_diagnosable_never_a_nameerror(truncated_path):
+    """A file we cannot lay out must refuse with a message that says WHY.
 
-    Regression guard: before the fix this raised ``NameError`` (undefined
-    ``n_flyback``), which would NOT match this ``pytest.raises`` and would
-    surface as a NameError failure instead.
+    This is the actual regression guard, and it is deliberately not tied to one
+    refusal reason. The bug it locks is that MemmapTiffSI formatted the unbound
+    name ``n_flyback`` into its assert message, so the refusal raised
+    ``NameError`` -- carrying no page arithmetic, matching no ``except
+    AssertionError``, and getting swallowed by callers that catch Exception
+    (mesotools analysis/sources.py) into a silent degrade.
+
+    This particular file reaches a DIFFERENT refusal since frame-averaging was
+    handled properly (2026-08-02): it has numFramesPerVolume = 28, which the
+    logAverageFactor of 7 divides, but numFramesPerVolumeWithFlyback = 29, which
+    it does not. Whether the flyback frame is averaged in, written unaveraged, or
+    dropped is UNMEASURED -- see the open question in
+    arco/plans/si_tiff_reading.plan.md -- so the reader refuses rather than
+    guessing a layout. Guessing is what produced every bug this suite pins.
     """
-    with pytest.raises(AssertionError, match="allow_truncated"):
+    with pytest.raises((AssertionError, ValueError)) as exc:
         MemmapTiffSI(str(truncated_path))
+    msg = str(exc.value)
+    assert "allow_truncated" in msg or "logAverageFactor" in msg, (
+        f"refusal must explain itself; got: {msg}")
+    # The page arithmetic must survive into the message either way.
+    assert any(tok in msg for tok in ("numFramesPerVolume", "pages_per_volume")), (
+        f"refusal must carry the page arithmetic; got: {msg}")
 
 
-def test_truncated_allow_true_constructs(truncated_path):
-    """allow_truncated=True constructs and discards the incomplete final volume."""
-    mm = MemmapTiffSI(str(truncated_path), allow_truncated=True)
-    T, Z, C, Y, X = mm.shape
-    assert T >= 1 and Z >= 1 and C >= 1
-    # Complete volumes only: T*Z*C pages account for all non-discarded pages.
-    assert T * Z * C >= 1
+def test_allow_truncated_does_not_paper_over_an_unknown_layout(truncated_path):
+    """allow_truncated means "stopped mid-volume", never "I cannot read this".
+
+    Discarding a remainder is only meaningful once the per-volume page count is
+    known. When the layout itself is undetermined there is no remainder to
+    discard, so the flag must NOT rescue the file -- otherwise a silently wrong
+    volume split reaches the caller wearing a warning about truncation.
+    """
+    with pytest.raises(ValueError, match="logAverageFactor"):
+        MemmapTiffSI(str(truncated_path), allow_truncated=True)
