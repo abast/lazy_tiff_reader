@@ -6,9 +6,11 @@ from .memmap_tiff_si import (MemmapTiffSI, UnknownLayoutError,
 from .mroi_si_tiff import (MosaicLayout, MroiGeometry, StaleAnnotationWarning,
                            acq_line_mask_from_annotations,
                            annotation_describes_geometry, assemble_mosaic,
-                           line_masks_for_geometry, load_mroi_geometry,
-                           mroi_mosaic_layout, open_si_stack, roi_y_slices,
-                           split_rois, stack_tyx)
+                           erode_line_mask, line_masks_for_geometry,
+                           load_mroi_geometry, mroi_mosaic_layout,
+                           open_si_stack, read_si_metadata, roi_y_slices,
+                           sf_skip_lines, shrink_line_mask, split_rois,
+                           stack_tyx)
 from .slices_to_offsets import slices_to_offsets
 
 __all__ = [
@@ -26,11 +28,15 @@ __all__ = [
     "acq_line_mask_from_annotations",
     "annotation_describes_geometry",
     "assemble_mosaic",
+    "erode_line_mask",
     "line_masks_for_geometry",
     "load_mroi_geometry",
     "mroi_mosaic_layout",
     "open_si_stack",
+    "read_si_metadata",
     "roi_y_slices",
+    "sf_skip_lines",
+    "shrink_line_mask",
     "split_rois",
     "stack_tyx",
 ]
