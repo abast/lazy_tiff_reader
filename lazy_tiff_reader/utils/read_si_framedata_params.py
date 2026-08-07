@@ -112,6 +112,18 @@ _SI_PARAMS = [
 # blobs -- the reason FrameData is so large -- are deliberately left unparsed.
 _ANNOTATION_PATTERN = rb'SI\.xroiProps\.Annotations\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+'
 
+# The annotation staleness fingerprint, e.g.
+# 'SI.xroiProps.annotations_for.built_at_posix'. Written by MROI_API's
+# publish_annotations alongside Annotations; it states what the annotation
+# claims about the page (n_rois, lines_per_frame, roi_names) plus when it was
+# built, so a reader can VERIFY agreement with the actual page instead of
+# trusting. built_at_posix / built_at_iso are deliberately char in the header
+# (the writer renders nested numerics at ~6 sig figs, which quantizes a posix
+# timestamp to +/-5000 s) -- they parse to str here; callers convert.
+# An absent annotations_for with Annotations present means the annotation was
+# published by a pre-fingerprint writer and its freshness CANNOT be verified.
+_FINGERPRINT_PATTERN = rb'SI\.xroiProps\.annotations_for\.[A-Za-z0-9_]+'
+
 
 def _parse_si_value(raw: bytes, unwrap_single: bool = True) -> Any:
     """
@@ -122,6 +134,8 @@ def _parse_si_value(raw: bytes, unwrap_single: bool = True) -> Any:
       'some string'         -> Python str  (strips the single quotes)
       [1 2 3] or [1;2;3]   -> Python list of int/float (semicolons = row separator,
                                treated as flat list here since we only need 1D params)
+      {'a' 'b'}             -> Python list of str (MATLAB cell array of char;
+                               how annotations_for.roi_names is rendered)
       42 / 3.14             -> Python int or float
       anything else         -> str as-is
 
@@ -138,6 +152,12 @@ def _parse_si_value(raw: bytes, unwrap_single: bool = True) -> Any:
 
     if s.startswith("'") and s.endswith("'"):
         return s[1:-1]
+
+    if s.startswith('{') and s.endswith('}'):
+        # Cell array of single-quoted char vectors, e.g. {'ROI1' 'ROI2'}.
+        # Never collapsed to a scalar: a caller iterating roi_names must get a
+        # list whether the group has one ROI or five.
+        return re.findall(r"'([^']*)'", s[1:-1])
 
     if s.startswith('[') and s.endswith(']'):
         inner = s[1:-1].strip()
@@ -230,7 +250,8 @@ def read_si_framedata_params(tiff_path: str) -> 'Optional[Dict[str, Any]]':
     dict or None
         ``{'FrameData': {key: value, ...}, 'RoiGroups': {...}, 'version': 3|4}``
         Same structure as tifffile's scanimage_metadata, but FrameData holds
-        only the keys in _SI_PARAMS plus any xroiProps line annotations.
+        only the keys in _SI_PARAMS plus any xroiProps line annotations and
+        the annotations_for staleness fingerprint.
         ``RoiGroups`` is absent when the file has no RoiData block.
         Returns None for non-ScanImage files.
     """
@@ -246,6 +267,7 @@ def read_si_framedata_params(tiff_path: str) -> 'Optional[Dict[str, Any]]':
     # absent from the file costs a full scan on its own.
     wanted = b'|'.join(re.escape(key).encode() for key in _SI_PARAMS)
     pattern = (rb'^(' + wanted + rb'|' + _ANNOTATION_PATTERN
+               + rb'|' + _FINGERPRINT_PATTERN
                + rb')[ \t]*=[ \t]*([^\n\r]*)')
 
     frame_data: Dict[str, Any] = {}
