@@ -48,6 +48,8 @@ _SI_BIGTIFF_MAGIC = 117637889  # 0x07030301 little-endian
 # The SI parameters MemmapTiffSI uses to determine array shape and acquisition info.
 # Add to this list if you need additional keys available via arr.metadata['FrameData'].
 _SI_PARAMS = [
+    'SI.VERSION_MAJOR',                    # version-qualified saved ROI row semantics
+    'SI.VERSION_MINOR',
     'SI.hChannels.channelSave',             # which channels were saved, e.g. [1 2]
     'SI.hStackManager.actualNumSlices',     # actual # Z planes per volume (excl. flyback)
     'SI.hStackManager.actualNumVolumes',    # actual # volumes (T dimension)

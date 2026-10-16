@@ -203,6 +203,15 @@ def load_mroi_geometry(
 
     obj_res = float(frame_data["SI.objectiveResolution"])
     line_avg = _line_averaging(frame_data)
+    # Measured SI 2026.1 RGG resonant files retain the native ROI pixel grid
+    # on disk even with LineAveragingLineCount > 1. The 2023 corpus instead
+    # stores Y / line_avg rows. Select by metadata, never by whichever fits.
+    native_saved_rows = (
+        frame_data.get("SI.VERSION_MAJOR") == 2026
+        and frame_data.get("SI.VERSION_MINOR") == 1
+        and frame_data.get("SI.hScan2D.scannerType") == "RGG"
+        and frame_data.get("SI.hScan2D.scanMode") == "resonant"
+    )
 
     dims = []
     centers = []
@@ -212,9 +221,9 @@ def load_mroi_geometry(
         if not _roi_enabled(sf):
             continue
         px = np.asarray(sf["pixelResolutionXY"], dtype=float)
-        # pixelResolutionXY = [X_px, Y_lines]; divide Y by line averaging
+        # pixelResolutionXY = [X_px, Y_lines], with version-specific saved Y.
         x_px = int(round(px[0]))
-        y_px = int(round(px[1] / line_avg))
+        y_px = int(round(px[1] / (1 if native_saved_rows else line_avg)))
         dims.append([x_px, y_px])
         centers.append(np.asarray(sf["centerXY"], dtype=float) * obj_res)
         sizes.append(np.asarray(sf["sizeXY"], dtype=float) * obj_res)
